@@ -1,9 +1,13 @@
 name: Release
-# Выпуск версии: поменять VERSION и CHANGELOG.md, затем
-#   git tag v$(cat VERSION) && git push origin --tags
+# Выпуск версии: поднять номер в VERSION, добавить раздел в CHANGELOG.md и запушить в main.
+# Workflow сам поставит тег vX.Y.Z, соберёт архив и Docker-образ и опубликует релиз.
+# Если релиз с такой версией уже есть — ничего не делает.
+# Можно также запустить вручную: Actions → Release → Run workflow.
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+    paths: [VERSION]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -13,17 +17,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Версия в теге совпадает с файлом VERSION
-        run: test "v$(cat VERSION)" = "${GITHUB_REF_NAME}"
+      - name: Версия
+        id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER=$(cat VERSION)
+          echo "tag=v$VER" >> "$GITHUB_OUTPUT"
+          if gh release view "v$VER" >/dev/null 2>&1; then
+            echo "Релиз v$VER уже существует — пропускаю."
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          fi
       - name: Сборка архива и Docker-образа
+        if: steps.v.outputs.skip != '1'
         run: ./build_offline.sh
       - name: Контрольные суммы
+        if: steps.v.outputs.skip != '1'
         run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
       - name: Заметки к выпуску из CHANGELOG
+        if: steps.v.outputs.skip != '1'
         run: |
           awk -v v="$(cat VERSION)" '$0 ~ "^## \\[?"v {f=1; next} /^## /{f=0} f' CHANGELOG.md > notes.md
           cat notes.md
-      - name: Публикация релиза
+      - name: Публикация релиза и тега
+        if: steps.v.outputs.skip != '1'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --title "innolib $GITHUB_REF_NAME" --notes-file notes.md
+        run: |
+          gh release create "${{ steps.v.outputs.tag }}" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "innolib ${{ steps.v.outputs.tag }}" \
+            --notes-file notes.md

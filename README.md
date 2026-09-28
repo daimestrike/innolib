@@ -112,11 +112,9 @@ docker compose exec innolib python3 app.py import /data/cases.csv
 
 1. Поднять номер в `VERSION` по SemVer: исправление → PATCH, новая функция → MINOR, несовместимое изменение → MAJOR.
 2. Добавить раздел в `CHANGELOG.md`.
-3. Закоммитить и поставить тег:
-```bash
-git tag v$(cat VERSION) && git push origin main --tags
-```
-GitHub Actions соберёт архив и Docker-образ и опубликует релиз с заметками из CHANGELOG.
+3. Закоммитить и запушить в `main`.
+
+GitHub Actions увидит новую версию в `VERSION`, поставит тег `vX.Y.Z`, соберёт архив и Docker-образ и опубликует релиз с заметками из CHANGELOG. Запустить выпуск вручную можно так: Actions → Release → Run workflow.
 
 ## Обновление в контуре
 
