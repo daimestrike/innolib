@@ -1,0 +1,29 @@
+name: Release
+# Выпуск версии: поменять VERSION и CHANGELOG.md, затем
+#   git tag v$(cat VERSION) && git push origin --tags
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Версия в теге совпадает с файлом VERSION
+        run: test "v$(cat VERSION)" = "${GITHUB_REF_NAME}"
+      - name: Сборка архива и Docker-образа
+        run: ./build_offline.sh
+      - name: Контрольные суммы
+        run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Заметки к выпуску из CHANGELOG
+        run: |
+          awk -v v="$(cat VERSION)" '$0 ~ "^## \\[?"v {f=1; next} /^## /{f=0} f' CHANGELOG.md > notes.md
+          cat notes.md
+      - name: Публикация релиза
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "innolib $GITHUB_REF_NAME" --notes-file notes.md

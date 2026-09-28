@@ -1,0 +1,22 @@
+# Запуск без Docker через systemd.
+#   sudo useradd --system --home /opt/innolib innolib
+#   sudo cp -r innolib /opt/innolib && sudo chown -R innolib /opt/innolib
+#   sudo cp deploy/innolib.service /etc/systemd/system/
+#   sudo cp .env.example /opt/innolib/.env   # и заполнить
+#   sudo systemctl daemon-reload && sudo systemctl enable --now innolib
+[Unit]
+Description=Библиотека инноваций (реестр кейсов)
+After=network.target
+
+[Service]
+User=innolib
+WorkingDirectory=/opt/innolib
+EnvironmentFile=-/opt/innolib/.env
+Environment=DB_PATH=/opt/innolib/data/innolib.sqlite3
+ExecStart=/usr/bin/python3 /opt/innolib/app.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

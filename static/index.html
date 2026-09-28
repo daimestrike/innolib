@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Библиотека инноваций X5</title>
+<link rel="stylesheet" href="static/fonts.css">
+<link rel="stylesheet" href="static/app.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <div class="eyebrow"><span>X5 · Цифровая трансформация</span><span class="demo-badge" id="demoBadge" hidden>Есть демо-данные</span></div>
+      <h1>Библиотека инноваций</h1>
+      <p class="lede">Все проекты и идеи в одном месте: что уже сделано, что в пилоте, что только задумано. Новый кейс заводится за пару минут через короткий опрос.</p>
+    </div>
+    <div class="top-actions">
+      <details class="menu">
+        <summary class="btn ghost">Выгрузить</summary>
+        <div class="menu-list">
+          <a href="api/export.csv">Таблица CSV (Excel)</a>
+          <a href="api/export.json">Резервная копия JSON</a>
+        </div>
+      </details>
+      <button class="btn primary" id="addBtn"><span class="plus">+</span> Добавить кейс</button>
+    </div>
+  </header>
+
+  <nav class="funnel" id="funnel" aria-label="Стадии"></nav>
+
+  <div class="toolbar">
+    <label class="search"><span class="mono" aria-hidden="true">⌕</span><input id="q" type="search" placeholder="Поиск по названию, проблеме, тегам" aria-label="Поиск"></label>
+    <select class="f" id="dirFilter" aria-label="Направление"></select>
+    <div class="seg" id="typeSeg" role="group" aria-label="Тип">
+      <button data-v="all" aria-pressed="true">Все</button>
+      <button data-v="project" aria-pressed="false">Проекты</button>
+      <button data-v="idea" aria-pressed="false">Идеи</button>
+    </div>
+    <span class="count" id="count"></span>
+  </div>
+
+  <div id="notice"></div>
+  <section class="grid" id="grid" aria-live="polite">
+    <div class="skel"></div><div class="skel"></div><div class="skel"></div>
+  </section>
+  <footer class="foot mono" id="foot"></footer>
+</div>
+
+<div class="overlay" id="dOverlay" hidden>
+  <aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="dTitle"></aside>
+</div>
+
+<div class="overlay" id="wOverlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="wTitle">
+    <div class="mhead"><h2 id="wTitle">Новый кейс</h2><div class="progress" id="wProg"></div><button class="x" id="wClose" aria-label="Закрыть">×</button></div>
+    <div class="mbody" id="wBody"></div>
+    <div class="mfoot" id="wFoot"></div>
+  </div>
+</div>
+
+<script src="static/app.js"></script>
+</body>
+</html>
