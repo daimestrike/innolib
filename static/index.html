@@ -13,7 +13,7 @@
     <div>
       <div class="eyebrow"><span>X5 · Цифровая трансформация</span><span class="demo-badge" id="demoBadge" hidden>Есть демо-данные</span></div>
       <h1>Библиотека инноваций</h1>
-      <p class="lede">Все проекты и идеи в одном месте: что уже сделано, что в пилоте, что только задумано. Новый кейс заводится за пару минут через короткий опрос.</p>
+      <p class="lede">Все проекты и идеи в одном месте: что уже сделано, что в пилоте, что только задумано. Консультант подскажет, что уже было, и поможет развить идею.</p>
     </div>
     <div class="top-actions">
       <details class="menu">
@@ -27,6 +27,12 @@
     </div>
   </header>
 
+  <div class="tabs" role="tablist" aria-label="Разделы">
+    <button role="tab" id="tabRegistry" aria-controls="registryView" aria-selected="true" data-view="registry">Реестр</button>
+    <button role="tab" id="tabChat" aria-controls="chatView" aria-selected="false" data-view="chat">Консультант</button>
+  </div>
+
+  <section id="registryView" role="tabpanel" aria-labelledby="tabRegistry">
   <nav class="funnel" id="funnel" aria-label="Стадии"></nav>
 
   <div class="toolbar">
@@ -43,6 +49,43 @@
   <div id="notice"></div>
   <section class="grid" id="grid" aria-live="polite">
     <div class="skel"></div><div class="skel"></div><div class="skel"></div>
+  </section>
+  </section>
+
+  <section id="chatView" role="tabpanel" aria-labelledby="tabChat" hidden>
+    <div class="chat-layout">
+      <div class="chat-main">
+        <div class="chat-log" id="chatLog" aria-live="polite"></div>
+        <form class="composer" id="composer" autocomplete="off">
+          <div class="composer-box">
+            <textarea id="chatIn" rows="1" placeholder="Спросите про проекты или опишите идею" aria-label="Сообщение консультанту"></textarea>
+            <button type="submit" class="btn primary send" id="sendBtn">Отправить</button>
+          </div>
+          <div class="composer-meta">
+            <span class="hint">Enter — отправить, Shift + Enter — новая строка</span>
+            <span class="composer-actions">
+              <button type="button" class="linkbtn" id="toCaseBtn" disabled>Оформить идею в карточку</button>
+              <button type="button" class="linkbtn" id="newChatBtn">Новый чат</button>
+            </span>
+          </div>
+        </form>
+      </div>
+      <aside class="kb" aria-labelledby="kbTitle">
+        <h3 id="kbTitle">Что знает консультант</h3>
+        <dl class="kb-stats">
+          <div><dt>Кейсов в реестре</dt><dd id="kbCases">–</dd></div>
+          <div><dt>Документов</dt><dd id="kbDocs">–</dd></div>
+        </dl>
+        <p class="hint" id="kbModel"></p>
+        <h4>База знаний</h4>
+        <p class="hint">Стратегии, регламенты, выгрузки страниц вики. Консультант будет на них ссылаться.</p>
+        <ul class="doc-list" id="docList"></ul>
+        <label class="btn ghost upload" for="docFile">Добавить документ</label>
+        <input type="file" id="docFile" accept=".txt,.md,.docx,.html,.htm,.csv" multiple hidden>
+        <p class="hint small">TXT, MD, DOCX, HTML. PDF сохраните как DOCX.</p>
+        <p class="err" id="docErr" role="alert"></p>
+      </aside>
+    </div>
   </section>
   <footer class="foot mono" id="foot"></footer>
 </div>

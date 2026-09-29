@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Библиотека инноваций — сервер реестра кейсов.
+"""Библиотека инноваций — реестр кейсов и консультант по идеям.
 
 Только стандартная библиотека Python 3.9+: никаких pip install,
 работает в закрытом контуре без доступа в интернет.
 
 Запуск:
-    python3 app.py                      # веб-сервер
-    python3 app.py import cases.csv     # загрузить кейсы из CSV/JSON
-    python3 app.py export > backup.json # выгрузить реестр
+    python3 app.py                       # веб-сервер
+    python3 app.py import cases.csv      # загрузить кейсы из CSV/JSON
+    python3 app.py export > backup.json  # выгрузить реестр
+    python3 app.py add-doc файл.docx ... # добавить документы в базу знаний
+    python3 app.py check-llm             # проверить подключение к LLM
+    python3 app.py reindex               # пересчитать эмбеддинги (если EMBED_MODEL задан)
 
-Настройки — через переменные окружения (см. .env.example).
+Настройки — через переменные окружения или файл .env рядом с app.py (см. .env.example).
 """
+import base64
 import csv
 import io
 import json
@@ -18,19 +22,39 @@ import mimetypes
 import os
 import re
 import sqlite3
-import ssl
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
 import uuid
 from datetime import datetime, timezone
-from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(BASE_DIR))
+
+
+def load_dotenv(path):
+    """Мини-загрузчик .env: переменные окружения, заданные явно, важнее файла."""
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k, v = k.strip(), v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
+            v = v[1:-1]
+        os.environ.setdefault(k, v)
+
+
+load_dotenv(BASE_DIR / ".env")
+
+from docs import DocError, extract_text  # noqa: E402
+from llm import LLM, LLMError, extract_json  # noqa: E402
+from rag import Rag, build_messages, retrieval_query  # noqa: E402
+
 try:
     VERSION = (BASE_DIR / "VERSION").read_text().strip()
 except OSError:
@@ -42,15 +66,10 @@ PORT = int(os.environ.get("PORT", "8080"))
 DB_PATH = os.environ.get("DB_PATH", str(BASE_DIR / "data" / "innolib.sqlite3"))
 SEED_DEMO = os.environ.get("SEED_DEMO", "1") == "1"
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
-
-LLM_URL = os.environ.get("LLM_URL", "").rstrip("/")  # напр. http://llm.local:8000/v1
-LLM_MODEL = os.environ.get("LLM_MODEL", "")
-LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
-LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "60"))
-LLM_CA_BUNDLE = os.environ.get("LLM_CA_BUNDLE", "")
-LLM_VERIFY_TLS = os.environ.get("LLM_VERIFY_TLS", "1") == "1"
+RAG_TOP_K = int(os.environ.get("RAG_TOP_K", "6"))
 
 MAX_BODY = 1_000_000
+MAX_DOC_BODY = 25_000_000
 
 STAGES = ["idea", "research", "pilot", "launched", "stopped"]
 STAGE_ALIASES = {
@@ -81,11 +100,19 @@ class Store:
         self.lock = threading.Lock()
         with self.lock:
             self.conn.execute("PRAGMA journal_mode=WAL")
-            self.conn.execute("""CREATE TABLE IF NOT EXISTS cases(
-                id TEXT PRIMARY KEY, code TEXT UNIQUE, data TEXT NOT NULL,
-                created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+            self.conn.executescript("""
+                CREATE TABLE IF NOT EXISTS cases(
+                    id TEXT PRIMARY KEY, code TEXT UNIQUE, data TEXT NOT NULL,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS docs(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, filename TEXT,
+                    text TEXT NOT NULL, created_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS embeddings(
+                    hash TEXT PRIMARY KEY, model TEXT NOT NULL, vec TEXT NOT NULL);
+            """)
             self.conn.commit()
 
+    # -------- cases
     def count(self):
         with self.lock:
             return self.conn.execute("SELECT COUNT(*) FROM cases").fetchone()[0]
@@ -141,6 +168,50 @@ class Store:
             self.conn.commit()
         return n > 0
 
+    # -------- knowledge base docs
+    @staticmethod
+    def _doc(r, with_text):
+        d = {"id": r["id"], "code": f"DOC-{r['id']}", "title": r["title"], "filename": r["filename"],
+             "chars": len(r["text"]), "createdAt": r["created_at"]}
+        if with_text:
+            d["text"] = r["text"]
+        return d
+
+    def list_docs(self, with_text=False):
+        with self.lock:
+            rows = self.conn.execute("SELECT * FROM docs ORDER BY id").fetchall()
+        return [self._doc(r, with_text) for r in rows]
+
+    def count_docs(self):
+        with self.lock:
+            return self.conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
+
+    def add_doc(self, title, filename, text):
+        with self.lock:
+            cur = self.conn.execute("INSERT INTO docs(title, filename, text, created_at) VALUES(?,?,?,?)",
+                                    (title[:200], filename[:200], text, now_iso()))
+            self.conn.commit()
+            r = self.conn.execute("SELECT * FROM docs WHERE id=?", (cur.lastrowid,)).fetchone()
+        return self._doc(r, False)
+
+    def delete_doc(self, did):
+        with self.lock:
+            n = self.conn.execute("DELETE FROM docs WHERE id=?", (did,)).rowcount
+            self.conn.commit()
+        return n > 0
+
+    # -------- embeddings cache
+    def load_embeddings(self, model):
+        with self.lock:
+            rows = self.conn.execute("SELECT hash, vec FROM embeddings WHERE model=?", (model,)).fetchall()
+        return {r["hash"]: json.loads(r["vec"]) for r in rows}
+
+    def save_embeddings(self, model, vecs):
+        with self.lock:
+            self.conn.executemany("INSERT OR REPLACE INTO embeddings VALUES(?,?,?)",
+                                  [(h, model, json.dumps(v)) for h, v in vecs.items()])
+            self.conn.commit()
+
 
 def s(v, limit=4000):
     return str(v if v is not None else "").strip()[:limit]
@@ -169,15 +240,13 @@ def clean_case(d):
     }
 
 
-# ---------------------------------------------------------------- LLM
-def llm_enabled():
-    return bool(LLM_URL and LLM_MODEL)
-
-
-def build_prompt(p):
+# ---------------------------------------------------------------- card parsing prompt
+def build_parse_prompt(p):
     parts = []
     if p.get("wikiText"):
         parts.append("ТЕКСТ СТРАНИЦЫ ВИКИ:\n" + s(p["wikiText"], 12000) + "\n")
+    if p.get("chat"):
+        parts.append("ДИАЛОГ С КОНСУЛЬТАНТОМ (извлеки из него суть идеи сотрудника):\n" + s(p["chat"], 12000) + "\n")
     labels = [("what", "Что сделали / хотят сделать"), ("problem", "Проблема и для кого"),
               ("stage", "Стадия (выбрана сотрудником)"), ("effect", "Эффект"),
               ("followup", "Уточнения")]
@@ -207,41 +276,6 @@ def build_prompt(p):
     )
 
 
-def extract_json(text):
-    text = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
-    try:
-        return json.loads(text)
-    except ValueError:
-        m = re.search(r"\{.*\}", text, re.S)
-        if m:
-            return json.loads(m.group(0))
-        raise
-
-
-def call_llm(prompt):
-    body = json.dumps({
-        "model": LLM_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1,
-    }).encode()
-    req = urllib.request.Request(LLM_URL + "/chat/completions", data=body, method="POST",
-                                 headers={"Content-Type": "application/json"})
-    if LLM_API_KEY:
-        req.add_header("Authorization", "Bearer " + LLM_API_KEY)
-    ctx = None
-    if LLM_URL.startswith("https"):
-        ctx = ssl.create_default_context(cafile=LLM_CA_BUNDLE or None)
-        if not LLM_VERIFY_TLS:
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-    # прокси из окружения не используем: LLM находится внутри контура
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
-                                         urllib.request.HTTPSHandler(context=ctx))
-    with opener.open(req, timeout=LLM_TIMEOUT) as r:
-        data = json.loads(r.read().decode("utf-8"))
-    return extract_json(data["choices"][0]["message"]["content"])
-
-
 # ---------------------------------------------------------------- export / import
 CSV_COLS = ["code", "title", "type", "stage", "direction", "owner", "unit", "problem",
             "solution", "effect", "effectKind", "tags", "wiki", "createdAt", "updatedAt"]
@@ -253,8 +287,7 @@ def to_csv(rows):
     w = csv.DictWriter(buf, fieldnames=CSV_COLS, delimiter=";", extrasaction="ignore")
     w.writeheader()
     for r in rows:
-        r = dict(r, tags="; ".join(r.get("tags") or []))
-        w.writerow(r)
+        w.writerow(dict(r, tags="; ".join(r.get("tags") or [])))
     return buf.getvalue()
 
 
@@ -281,11 +314,13 @@ def import_rows(store, rows):
 class Handler(BaseHTTPRequestHandler):
     server_version = "InnoLib/" + VERSION
     store: Store = None
+    llm: LLM = None
+    rag: Rag = None
 
     def log_message(self, fmt, *args):
         log("%s %s" % (self.address_string(), fmt % args))
 
-    # helpers
+    # -------- helpers
     def send_json(self, obj, status=200):
         body = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(status)
@@ -298,9 +333,9 @@ class Handler(BaseHTTPRequestHandler):
     def send_err(self, status, code, message):
         self.send_json({"error": code, "message": message}, status)
 
-    def read_json(self):
+    def read_json(self, limit=MAX_BODY):
         n = int(self.headers.get("Content-Length") or 0)
-        if n > MAX_BODY:
+        if n > limit:
             raise ValueError("too_large")
         return json.loads(self.rfile.read(n).decode("utf-8") or "{}") if n else {}
 
@@ -310,16 +345,34 @@ class Handler(BaseHTTPRequestHandler):
         m = re.search(r"/(api/.*|healthz)$", path)
         return (m.group(1) if m else None), path
 
-    # verbs
+    def query_param(self, name):
+        from urllib.parse import parse_qs, urlsplit
+        return (parse_qs(urlsplit(self.path).query).get(name) or [""])[0]
+
+    def is_admin(self):
+        return bool(ADMIN_TOKEN) and self.headers.get("X-Admin-Token") == ADMIN_TOKEN
+
+    def changed(self):
+        self.rag.invalidate()
+
+    # -------- verbs
     def do_GET(self):
         api, path = self.route()
         if api == "healthz":
             return self.send_json({"ok": True, "version": VERSION, "cases": self.store.count()})
         if api == "api/config":
-            return self.send_json({"version": VERSION, "llm": llm_enabled(), "stages": STAGES, "directions": DIRECTIONS,
-                                   "canDelete": bool(ADMIN_TOKEN)})
+            return self.send_json({
+                "version": VERSION, "llm": self.llm.enabled, "chatModel": self.llm.chat_model if self.llm.enabled else "",
+                "embeddings": self.llm.embeddings_enabled, "stages": STAGES, "directions": DIRECTIONS,
+                "canDelete": bool(ADMIN_TOKEN)})
         if api == "api/cases":
             return self.send_json({"cases": self.store.list()})
+        if api == "api/docs":
+            return self.send_json({"docs": self.store.list_docs()})
+        if api == "api/search":
+            q = self.query_param("q")
+            return self.send_json({"results": [
+                {k: v for k, v in r.items() if k != "boost"} for r in self.rag.search(q, RAG_TOP_K)]})
         if api == "api/export.json":
             body = json.dumps({"exportedAt": now_iso(), "cases": self.store.list()},
                               ensure_ascii=False, indent=2).encode()
@@ -334,25 +387,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         api, _ = self.route()
         try:
-            body = self.read_json()
+            body = self.read_json(MAX_DOC_BODY if api == "api/docs" else MAX_BODY)
         except ValueError:
             return self.send_err(400, "bad_request", "Некорректный JSON или слишком большой запрос")
         if api == "api/cases":
-            return self.send_json(self.store.create(body), 201)
+            doc = self.store.create(body)
+            self.changed()
+            return self.send_json(doc, 201)
         if api == "api/parse":
-            if not llm_enabled():
-                return self.send_err(503, "llm_disabled", "LLM не настроен (LLM_URL, LLM_MODEL)")
-            try:
-                t = time.time()
-                result = call_llm(build_prompt(body))
-                log(f"LLM ok in {time.time() - t:.1f}s")
-                return self.send_json(result if isinstance(result, dict) else {})
-            except (urllib.error.URLError, TimeoutError, OSError) as e:
-                log(f"LLM network error: {e}")
-                return self.send_err(502, "llm_unreachable", "LLM не отвечает")
-            except (ValueError, KeyError, IndexError) as e:
-                log(f"LLM bad response: {e}")
-                return self.send_err(502, "llm_bad_response", "LLM вернул ответ не в формате JSON")
+            return self.handle_parse(body)
+        if api == "api/chat":
+            return self.handle_chat(body)
+        if api == "api/docs":
+            return self.handle_add_doc(body)
         return self.send_err(404, "not_found", "Нет такого адреса")
 
     def do_PATCH(self):
@@ -365,18 +412,110 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return self.send_err(400, "bad_request", "Некорректный JSON")
         doc = self.store.update(m.group(1), body)
+        if doc:
+            self.changed()
         return self.send_json(doc) if doc else self.send_err(404, "not_found", "Кейс не найден")
 
     def do_DELETE(self):
         api, _ = self.route()
-        m = re.fullmatch(r"api/cases/([\w-]+)", api or "")
+        m = re.fullmatch(r"api/(cases|docs)/([\w-]+)", api or "")
         if not m:
             return self.send_err(404, "not_found", "Нет такого адреса")
-        if not ADMIN_TOKEN or self.headers.get("X-Admin-Token") != ADMIN_TOKEN:
+        if not self.is_admin():
             return self.send_err(403, "forbidden", "Удаление доступно только администратору")
-        ok = self.store.delete(m.group(1))
-        return self.send_json({"ok": ok}) if ok else self.send_err(404, "not_found", "Кейс не найден")
+        if m.group(1) == "cases":
+            ok = self.store.delete(m.group(2))
+        else:
+            ok = m.group(2).isdigit() and self.store.delete_doc(int(m.group(2)))
+        if ok:
+            self.changed()
+        return self.send_json({"ok": True}) if ok else self.send_err(404, "not_found", "Не найдено")
 
+    # -------- handlers
+    def handle_parse(self, body):
+        if not self.llm.enabled:
+            return self.send_err(503, "llm_disabled", "LLM не настроен (LLM_URL, LLM_MODEL)")
+        try:
+            t = time.time()
+            text = self.llm.complete([{"role": "user", "content": build_parse_prompt(body)}], temperature=0.1)
+            result = extract_json(text)
+            log(f"parse ok in {time.time() - t:.1f}s")
+            return self.send_json(result if isinstance(result, dict) else {})
+        except LLMError as e:
+            log(f"parse: {e}")
+            return self.send_err(502, e.code, str(e))
+        except ValueError:
+            return self.send_err(502, "llm_bad_response", "LLM вернул ответ не в формате JSON")
+
+    def handle_add_doc(self, body):
+        filename = s(body.get("filename"), 200) or "document.txt"
+        title = s(body.get("title"), 200) or re.sub(r"\.[^.]+$", "", filename)
+        try:
+            if body.get("text"):
+                text = extract_text("x.txt", str(body["text"]).encode("utf-8"))
+            else:
+                raw = base64.b64decode(body.get("contentBase64") or "", validate=False)
+                text = extract_text(filename, raw)
+        except DocError as e:
+            return self.send_err(400, "bad_document", str(e))
+        doc = self.store.add_doc(title, filename, text)
+        self.changed()
+        log(f"doc added {doc['code']} «{title}» ({len(text)} симв.)")
+        return self.send_json(doc, 201)
+
+    def sse(self, obj):
+        self.wfile.write(("data: " + json.dumps(obj, ensure_ascii=False) + "\n\n").encode("utf-8"))
+        self.wfile.flush()
+
+    def handle_chat(self, body):
+        history = [m for m in (body.get("messages") or []) if isinstance(m, dict)][-30:]
+        if not history or history[-1].get("role") != "user":
+            return self.send_err(400, "bad_request", "Последнее сообщение должно быть от пользователя")
+        found = self.rag.search(retrieval_query(history), RAG_TOP_K)
+        sources = [{"ref": f["ref"], "kind": f["kind"], "title": f["title"], "stage": f.get("stage"),
+                    "caseId": f.get("caseId"), "snippet": f["text"][:600]} for f in found]
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")  # nginx: не буферизовать поток
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        gen = None
+        try:
+            self.sse({"type": "sources", "sources": sources})
+            if not self.llm.enabled:
+                text = ("Консультант не подключён: на сервере не задан LLM (LLM_URL, LLM_MODEL). "
+                        "Ниже — что нашлось в реестре по вашему вопросу.")
+                if not found:
+                    text = "Консультант не подключён, и по вашему вопросу в реестре ничего не нашлось."
+                self.sse({"type": "delta", "text": text})
+                self.sse({"type": "done"})
+                return
+            cases = self.store.list()
+            msgs = build_messages(history, cases, found, self.store.count_docs())
+            t = time.time()
+            gen = self.llm.stream(msgs, temperature=0.3)
+            n = 0
+            for piece in gen:
+                n += len(piece)
+                self.sse({"type": "delta", "text": piece})
+            log(f"chat ok: {n} симв. за {time.time() - t:.1f}s, источников {len(found)}")
+            self.sse({"type": "done"})
+        except LLMError as e:
+            log(f"chat: {e}")
+            try:
+                self.sse({"type": "error", "code": e.code, "message": str(e)})
+            except OSError:
+                pass
+        except (BrokenPipeError, ConnectionResetError):
+            log("chat: клиент прервал ответ")
+        finally:
+            if gen is not None:
+                gen.close()
+
+    # -------- files
     def send_file_bytes(self, body, ctype, filename):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
@@ -391,7 +530,7 @@ class Handler(BaseHTTPRequestHandler):
         if STATIC_DIR.resolve() not in target.parents and target != STATIC_DIR / "index.html":
             return self.send_err(404, "not_found", "Нет такого файла")
         if not target.is_file():
-            target = STATIC_DIR / "index.html"  # SPA: любой неизвестный путь — главная
+            target = STATIC_DIR / "index.html"  # любой неизвестный путь — главная
         ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         if target.suffix == ".woff2":
             ctype = "font/woff2"
@@ -405,29 +544,91 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+# ---------------------------------------------------------------- CLI
+def check_llm(llm):
+    if not llm.enabled:
+        print("LLM не настроен: задайте LLM_URL и LLM_MODEL (в .env или окружении).")
+        return 1
+    print(f"Адрес: {llm.url}\nМодель: {llm.chat_model}\nКлюч: {'задан' if llm.key else 'не задан'}")
+    ok = True
+    try:
+        ids = llm.models()
+        mark = "есть" if llm.chat_model in ids else "НЕ НАЙДЕНА в списке"
+        print(f"[ok] /models: {len(ids)} моделей, {llm.chat_model} — {mark}")
+    except LLMError as e:
+        print(f"[!] /models: {e}")
+    try:
+        t = time.time()
+        ans = llm.complete([{"role": "user", "content": "Ответь одним словом: работает?"}])
+        print(f"[ok] ответ за {time.time() - t:.1f} c: {ans[:80]!r}")
+    except LLMError as e:
+        ok = False
+        print(f"[x] chat/completions: {e}")
+    try:
+        t = time.time()
+        text = "".join(llm.stream([{"role": "user", "content": "Назови три цвета через запятую."}]))
+        print(f"[ok] потоковый ответ за {time.time() - t:.1f} c: {text[:80]!r}")
+    except LLMError as e:
+        ok = False
+        print(f"[x] stream: {e}")
+    if llm.embeddings_enabled:
+        try:
+            v = llm.embed(["проверка"])[0]
+            print(f"[ok] эмбеддинги {llm.embed_model}: размерность {len(v)}")
+        except LLMError as e:
+            ok = False
+            print(f"[x] эмбеддинги: {e}")
+    else:
+        print("[i] EMBED_MODEL не задан — поиск работает на BM25 (этого достаточно для сотен кейсов)")
+    return 0 if ok else 1
+
+
 def main():
     store = Store(DB_PATH)
+    llm = LLM(os.environ)
+    rag = Rag(store, llm, log)
     args = sys.argv[1:]
-    if args and args[0] == "import":
+    cmd = args[0] if args else "serve"
+
+    if cmd == "import":
         if len(args) < 2:
             sys.exit("Использование: python3 app.py import файл.csv|файл.json")
         n = import_rows(store, read_import(args[1]))
         print(f"Загружено кейсов: {n}. Всего в реестре: {store.count()}")
         return
-    if args and args[0] == "export":
+    if cmd == "export":
         print(json.dumps({"exportedAt": now_iso(), "cases": store.list()}, ensure_ascii=False, indent=2))
         return
-    if args and args[0] not in ("serve",):
-        sys.exit("Команды: serve (по умолчанию), import <файл>, export")
+    if cmd == "add-doc":
+        if len(args) < 2:
+            sys.exit("Использование: python3 app.py add-doc файл.docx [файл2.md ...]")
+        for p in args[1:]:
+            try:
+                d = store.add_doc(Path(p).stem, Path(p).name, extract_text(p, Path(p).read_bytes()))
+                print(f"{d['code']}: {d['title']} ({d['chars']} симв.)")
+            except (DocError, OSError) as e:
+                print(f"{p}: {e}")
+        return
+    if cmd == "check-llm":
+        sys.exit(check_llm(llm))
+    if cmd == "reindex":
+        n = rag.warm() if llm.embeddings_enabled else 0
+        print(f"Проиндексировано фрагментов: {len(rag.get_index().chunks)}, новых эмбеддингов: {n}")
+        return
+    if cmd != "serve":
+        sys.exit("Команды: serve (по умолчанию), import, export, add-doc, check-llm, reindex")
 
     if SEED_DEMO and store.count() == 0:
         seed = BASE_DIR / "data" / "seed_demo.json"
         if seed.exists():
             log(f"Пустая база — загружаю демо-кейсы: {import_rows(store, read_import(str(seed)))}")
-    Handler.store = store
+    Handler.store, Handler.llm, Handler.rag = store, llm, rag
+    rag.warm_async()
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
+    httpd.daemon_threads = True
     log(f"Библиотека инноваций {VERSION}: http://{HOST}:{PORT}  БД: {DB_PATH}  "
-        f"LLM: {'вкл (' + LLM_MODEL + ')' if llm_enabled() else 'выкл'}")
+        f"LLM: {'вкл (' + llm.chat_model + ')' if llm.enabled else 'выкл'}  "
+        f"поиск: {'BM25 + эмбеддинги ' + llm.embed_model if llm.embeddings_enabled else 'BM25'}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

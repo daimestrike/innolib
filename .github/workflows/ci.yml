@@ -21,6 +21,15 @@ jobs:
           curl -fs localhost:8080/api/export.csv | grep -q CI
           curl -fs localhost:8080/ | grep -q "Библиотека инноваций"
           DB_PATH=/tmp/t.sqlite3 python3 app.py import data/import_template.csv
+          # база знаний и поиск
+          curl -fs -X POST localhost:8080/api/docs -H 'Content-Type: application/json' \
+            -d '{"title":"Регламент","text":"Пилот длится не более трёх месяцев, метрики фиксируются до старта."}' >/dev/null
+          curl -fsG localhost:8080/api/search --data-urlencode "q=сколько длится пилот" | grep -q DOC-1
+          curl -fsG localhost:8080/api/search --data-urlencode "q=потери на кассах" | grep -q INN-002
+          # консультант без модели отдаёт найденные кейсы потоком
+          curl -fsN -X POST localhost:8080/api/chat -H 'Content-Type: application/json' \
+            -d '{"messages":[{"role":"user","content":"что есть по антифроду"}]}' | grep -q '"type": "done"'
+          python3 -m py_compile app.py llm.py rag.py docs.py
   docker:
     runs-on: ubuntu-latest
     steps:

@@ -14,7 +14,7 @@ ENV PYTHONUNBUFFERED=1 \
     DB_PATH=/data/innolib.sqlite3
 
 WORKDIR /app
-COPY app.py VERSION ./
+COPY *.py VERSION ./
 COPY static ./static
 COPY data/seed_demo.json ./data/seed_demo.json
 
