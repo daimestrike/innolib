@@ -29,6 +29,8 @@ jobs:
           # консультант без модели отдаёт найденные кейсы потоком
           curl -fsN -X POST localhost:8080/api/chat -H 'Content-Type: application/json' \
             -d '{"messages":[{"role":"user","content":"что есть по антифроду"}]}' | grep -q '"type": "done"'
+          # генератор идей без модели честно отвечает 503
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8080/api/ideas -H 'Content-Type: application/json' -d '{"topic":"списания"}')" = 503
           python3 -m py_compile app.py llm.py rag.py docs.py
   docker:
     runs-on: ubuntu-latest

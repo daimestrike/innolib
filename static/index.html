@@ -30,6 +30,7 @@
   <div class="tabs" role="tablist" aria-label="Разделы">
     <button role="tab" id="tabRegistry" aria-controls="registryView" aria-selected="true" data-view="registry">Реестр</button>
     <button role="tab" id="tabChat" aria-controls="chatView" aria-selected="false" data-view="chat">Консультант</button>
+    <button role="tab" id="tabIdeas" aria-controls="ideasView" aria-selected="false" data-view="ideas">Генератор идей</button>
   </div>
 
   <section id="registryView" role="tabpanel" aria-labelledby="tabRegistry">
@@ -50,6 +51,29 @@
   <section class="grid" id="grid" aria-live="polite">
     <div class="skel"></div><div class="skel"></div><div class="skel"></div>
   </section>
+  </section>
+
+  <section id="ideasView" role="tabpanel" aria-labelledby="tabIdeas" hidden>
+    <form class="idea-form" id="ideaForm" autocomplete="off">
+      <div class="idea-form-head">
+        <h2>Генератор идей</h2>
+        <p>Опишите проблему или область. Ассистент предложит идеи, опираясь на то, что в X5 уже сделано, и покажет, на какие кейсы каждая идея опирается.</p>
+      </div>
+      <label for="ideaTopic" class="lbl-strong">Проблема или область</label>
+      <textarea id="ideaTopic" rows="3" placeholder="Например: высокие списания свежей продукции в магазинах у дома"></textarea>
+      <div class="chips" id="ideaPresets"></div>
+      <div class="idea-form-row">
+        <label>Направление
+          <select class="t" id="ideaDir"></select>
+        </label>
+        <label>Сколько идей
+          <select class="t" id="ideaCount"><option>3</option><option selected>4</option><option>5</option></select>
+        </label>
+        <button type="submit" class="btn primary" id="ideaGo">Придумать идеи</button>
+      </div>
+      <p class="err" id="ideaErr" role="alert"></p>
+    </form>
+    <div id="ideasOut" aria-live="polite"></div>
   </section>
 
   <section id="chatView" role="tabpanel" aria-labelledby="tabChat" hidden>

@@ -53,7 +53,7 @@ load_dotenv(BASE_DIR / ".env")
 
 from docs import DocError, extract_text  # noqa: E402
 from llm import LLM, LLMError, extract_json  # noqa: E402
-from rag import Rag, build_messages, retrieval_query  # noqa: E402
+from rag import Rag, build_ideas_messages, build_messages, retrieval_query  # noqa: E402
 
 try:
     VERSION = (BASE_DIR / "VERSION").read_text().strip()
@@ -398,6 +398,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.handle_parse(body)
         if api == "api/chat":
             return self.handle_chat(body)
+        if api == "api/ideas":
+            return self.handle_ideas(body)
         if api == "api/docs":
             return self.handle_add_doc(body)
         return self.send_err(404, "not_found", "Нет такого адреса")
@@ -446,6 +448,50 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_err(502, e.code, str(e))
         except ValueError:
             return self.send_err(502, "llm_bad_response", "LLM вернул ответ не в формате JSON")
+
+    def handle_ideas(self, body):
+        topic = s(body.get("topic"), 2000)
+        if len(topic) < 3:
+            return self.send_err(400, "bad_request", "Опишите проблему или область хотя бы парой слов")
+        if not self.llm.enabled:
+            return self.send_err(503, "llm_disabled",
+                                 "Генератору нужна модель: задайте LLM_URL и LLM_MODEL на сервере")
+        direction = s(body.get("direction"), 80)
+        count = min(max(int(body.get("count") or 3), 1), 6)
+        exclude = [s(x, 120) for x in (body.get("exclude") or []) if s(x)][:20]
+        found = self.rag.search(f"{topic} {direction}", 8)
+        cases = self.store.list()
+        msgs = build_ideas_messages(topic, direction, count, exclude, cases, found,
+                                    self.store.count_docs(), DIRECTIONS)
+        try:
+            t = time.time()
+            data = extract_json(self.llm.complete(msgs, temperature=0.7))
+        except LLMError as e:
+            log(f"ideas: {e}")
+            return self.send_err(502, e.code, str(e))
+        except ValueError:
+            return self.send_err(502, "llm_bad_response", "Модель вернула идеи не в формате JSON, попробуйте ещё раз")
+        raw = data.get("ideas") if isinstance(data, dict) else data
+        codes = {c["code"] for c in cases}
+        ideas = []
+        for it in (raw if isinstance(raw, list) else [])[:count]:
+            if not isinstance(it, dict) or not s(it.get("title")):
+                continue
+            based = it.get("basedOn") or []
+            if isinstance(based, str):
+                based = re.findall(r"INN-\d+", based)
+            ideas.append({
+                "title": s(it.get("title"), 120), "problem": s(it.get("problem"), 600),
+                "solution": s(it.get("solution"), 1000),
+                "direction": s(it.get("direction"), 80) if s(it.get("direction")) in DIRECTIONS else (direction or DIRECTIONS[-1]),
+                "effect": s(it.get("effect"), 300), "firstStep": s(it.get("firstStep"), 500),
+                "novelty": s(it.get("novelty"), 500),
+                "basedOn": [c for c in (s(x, 20) for x in based) if c in codes][:4],  # только реальные коды
+            })
+        log(f"ideas ok: {len(ideas)} шт. за {time.time() - t:.1f}s")
+        if not ideas:
+            return self.send_err(502, "llm_bad_response", "Модель не вернула ни одной идеи, попробуйте переформулировать тему")
+        return self.send_json({"ideas": ideas})
 
     def handle_add_doc(self, body):
         filename = s(body.get("filename"), 200) or "document.txt"

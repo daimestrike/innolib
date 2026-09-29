@@ -299,3 +299,29 @@ def build_messages(history, cases, found, docs_count, max_turns=12):
 def retrieval_query(history):
     users = [str(m.get("content", "")) for m in history if m.get("role") == "user"]
     return " ".join(users[-2:])[-2000:]
+
+
+IDEAS_PROMPT = """Ты — генератор инновационных идей для розничной сети X5. Придумай {count} новых идей по теме сотрудника.
+
+Требования к идеям:
+- Каждая решает конкретную проблему темы и реализуема в рознице X5 (магазины, логистика, офис).
+- Опирайся на существующие кейсы из контекста: что можно переиспользовать, масштабировать, объединить или перенести в другое подразделение. Указывай коды этих кейсов в basedOn.
+- Не повторяй уже существующие проекты один в один — идея должна добавлять новое.
+- Идеи должны быть разными по подходу (например: ИИ, компьютерное зрение, автоматизация процесса, аналитика).
+- Эффект — ожидаемый, реалистичный; не выдумывай точные цифры, пиши порядок или метрику.
+{exclude}
+Тема: {topic}
+{direction}
+Верни ТОЛЬКО JSON без пояснений:
+{{"ideas":[{{"title":"название до 60 символов","problem":"какую боль решает, 1 предложение","solution":"суть решения, 1–2 предложения","direction":"одно из: {dirs}","effect":"ожидаемый эффект и метрика","firstStep":"как проверить за 2–4 недели","basedOn":["INN-…"],"novelty":"чем отличается от существующих кейсов"}}]}}"""
+
+
+def build_ideas_messages(topic, direction, count, exclude, cases, found, docs_count, dirs):
+    ex = ""
+    if exclude:
+        ex = "- Эти идеи уже предложены, придумай другие: " + "; ".join(exclude[:20]) + "\n"
+    prompt = IDEAS_PROMPT.format(count=count, exclude=ex, topic=topic,
+                                 direction=f"Предпочтительное направление: {direction}" if direction else "",
+                                 dirs=" | ".join(dirs))
+    return [{"role": "system", "content": build_context(cases, found, docs_count)},
+            {"role": "user", "content": prompt}]

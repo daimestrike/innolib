@@ -303,7 +303,7 @@ function debounce(fn,ms){let t;return(...a)=>{clearTimeout(t);t=setTimeout(()=>f
 async function saveDraft(btn){
   const d=readDraft();
   btn.disabled=true;
-  try{const saved=await api('api/cases',{method:'POST',body:d});closeWizard();toast('Кейс '+saved.code+' добавлен в реестр');reload();}
+  try{const saved=await api('api/cases',{method:'POST',body:d});const cb=W.onSaved;closeWizard();toast('Кейс '+saved.code+' добавлен в реестр');reload();if(cb)cb(saved);}
   catch(e){btn.disabled=false;$('#saveErr').textContent='Не удалось сохранить: '+e.message;}
 }
 $('#wOverlay').addEventListener('click',e=>{
@@ -502,14 +502,82 @@ $('#chatIn').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.
 $('#chatIn').addEventListener('input',e=>{const t=e.target;t.style.height='auto';t.style.height=Math.min(t.scrollHeight,200)+'px'});
 $('#newChatBtn').onclick=()=>{if(streaming)streaming.abort();chat.messages=[];saveChat();renderChat();$('#chatIn').focus()};
 $('#toCaseBtn').onclick=wizardFromChat;
+const VIEWS={registry:['#registryView','#tabRegistry'],chat:['#chatView','#tabChat'],ideas:['#ideasView','#tabIdeas']};
 function setView(v){
-  const on=v==='chat';
-  $('#registryView').hidden=on;$('#chatView').hidden=!on;
-  $('#tabRegistry').setAttribute('aria-selected',String(!on));$('#tabChat').setAttribute('aria-selected',String(on));
-  try{history.replaceState(null,'',on?'#chat':location.pathname+location.search)}catch(e){}
-  if(on){renderChat();renderKB();setTimeout(()=>$('#chatIn').focus(),0)}
+  if(!VIEWS[v])v='registry';
+  for(const [k,[sec,tab]] of Object.entries(VIEWS)){$(sec).hidden=k!==v;$(tab).setAttribute('aria-selected',String(k===v))}
+  try{history.replaceState(null,'',v==='registry'?location.pathname+location.search:'#'+v)}catch(e){}
+  if(v==='chat'){renderChat();renderKB();setTimeout(()=>$('#chatIn').focus(),0)}
+  if(v==='ideas'){renderIdeas();if(!ideasState.ideas.length)setTimeout(()=>$('#ideaTopic').focus(),0)}
 }
 document.querySelector('.tabs').addEventListener('click',e=>{const b=e.target.closest('[data-view]');if(b)setView(b.dataset.view)});
+
+/* ---------- idea generator ---------- */
+const IDEA_PRESETS=['Потери и хищения в магазинах','Списания свежей продукции','Долгая приёмка товара','Обучение новых сотрудников','Очереди на кассах','Ручная работа с документами'];
+let ideasState={topic:'',ideas:[],loading:false};
+function ideaCardHTML(it,i){
+  return `<article class="idea${it.added?' added':''}" data-i="${i}">
+    <div class="idea-top"><span class="idea-num">Идея ${i+1}</span><span class="idea-dir">${esc(it.direction)}</span></div>
+    <h4>${esc(it.title)}</h4>
+    <p class="sol">${esc(it.solution)}</p>
+    <dl>
+      ${it.problem?`<div><dt>Проблема</dt><dd>${esc(it.problem)}</dd></div>`:''}
+      ${it.effect?`<div><dt>Ожидаемый эффект</dt><dd>${esc(it.effect)}</dd></div>`:''}
+      ${it.firstStep?`<div><dt>Как проверить</dt><dd>${esc(it.firstStep)}</dd></div>`:''}
+      ${it.novelty?`<div><dt>Что нового</dt><dd>${esc(it.novelty)}</dd></div>`:''}
+    </dl>
+    ${it.basedOn&&it.basedOn.length?`<div class="based">Опирается на ${it.basedOn.map(c=>{const cs=cases.find(x=>x.code===c);return `<button type="button" class="ref" data-ref="${esc(c)}" title="${esc(cs?cs.title:'')}">${esc(c)}</button>`}).join(' ')}</div>`:'<div class="based">Новое направление: похожих кейсов в реестре нет</div>'}
+    <div class="idea-actions">
+      <button type="button" class="btn ${it.added?'':'primary'}" data-idea-act="add" ${it.added?'disabled':''}>${it.added?'В реестре · '+esc(it.added):'В реестр'}</button>
+      <button type="button" class="btn" data-idea-act="discuss">Обсудить с консультантом</button>
+    </div>
+  </article>`;
+}
+function renderIdeas(){
+  const out=$('#ideasOut');const n=+$('#ideaCount').value;
+  if(!ideasState.ideas.length&&!ideasState.loading){
+    out.innerHTML=CFG.llm?'':'<div class="warn ideas-empty">Генератору нужна модель: администратору — задать LLM_URL и LLM_MODEL в .env.</div>';return;
+  }
+  const skels=ideasState.loading?Array.from({length:n},()=>'<div class="skel-idea"></div>').join(''):'';
+  out.innerHTML=`<div class="ideas-meta"><h3>${ideasState.loading&&!ideasState.ideas.length?'Придумываю идеи…':'Идеи по теме «'+esc(ideasState.topic.slice(0,80))+'»'}</h3>
+    ${ideasState.ideas.length&&!ideasState.loading?'<button type="button" class="btn" id="moreIdeas">Ещё идеи</button>':''}</div>
+    <div class="ideas-grid">${ideasState.ideas.map(ideaCardHTML).join('')}${skels}</div>`;
+}
+async function generateIdeas(more){
+  const topic=more?ideasState.topic:$('#ideaTopic').value.trim();
+  $('#ideaErr').textContent='';
+  if(topic.length<3){$('#ideaErr').textContent='Опишите проблему или область хотя бы парой слов.';$('#ideaTopic').focus();return}
+  if(ideasState.loading)return;
+  if(!more)ideasState={topic,ideas:[],loading:true};else ideasState.loading=true;
+  $('#ideaGo').disabled=true;renderIdeas();
+  try{
+    const d=await api('api/ideas',{method:'POST',body:{topic,direction:$('#ideaDir').value,count:+$('#ideaCount').value,exclude:ideasState.ideas.map(x=>x.title)}});
+    ideasState.ideas=ideasState.ideas.concat(d.ideas||[]);
+  }catch(e){$('#ideaErr').textContent='Не получилось придумать идеи: '+e.message}
+  ideasState.loading=false;$('#ideaGo').disabled=false;renderIdeas();
+}
+function ideaToWizard(i){
+  const it=ideasState.ideas[i];if(!it)return;
+  openWizard();
+  Object.assign(W,{mode:'scratch',step:4,followupAsked:true,aiNote:'',history:[],onSaved:saved=>{it.added=saved.code;renderIdeas()}});
+  W.draft=normalize({title:it.title,type:'idea',stage:'idea',direction:it.direction,problem:it.problem,
+    solution:it.solution+(it.firstStep?'\nКак проверить: '+it.firstStep:''),effect:it.effect,effectKind:'plan',tags:[]});
+  drawWizard();
+}
+$('#ideaDir').innerHTML='<option value="">Любое</option>'+DIRS.map(d=>`<option>${esc(d)}</option>`).join('');
+$('#ideaPresets').innerHTML=IDEA_PRESETS.map(p=>`<button type="button" class="chip" data-preset="${esc(p)}">${esc(p)}</button>`).join('');
+$('#ideaPresets').addEventListener('click',e=>{const b=e.target.closest('[data-preset]');if(!b)return;$('#ideaTopic').value=b.dataset.preset;$('#ideaTopic').focus()});
+$('#ideaForm').addEventListener('submit',e=>{e.preventDefault();generateIdeas(false)});
+$('#ideaTopic').addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();generateIdeas(false)}});
+$('#ideasOut').addEventListener('click',e=>{
+  if(e.target.closest('#moreIdeas')){generateIdeas(true);return}
+  const r=e.target.closest('[data-ref]');
+  if(r){const c=cases.find(x=>x.code===r.dataset.ref);if(c)openDetail(c.id);return}
+  const a=e.target.closest('[data-idea-act]');if(!a)return;
+  const i=+a.closest('.idea').dataset.i,it=ideasState.ideas[i];
+  if(a.dataset.ideaAct==='add')ideaToWizard(i);
+  else{setView('chat');sendChat(`Хочу развить идею «${it.title}»: ${it.solution} Что уже есть похожего, какие риски и как проверить её пилотом?`)}
+});
 
 /* ---------- events ---------- */
 $('#addBtn').onclick=openWizard;
@@ -524,7 +592,7 @@ fillDirFilter();renderFunnel();
 (async()=>{
   try{CFG=await api('api/config');}catch(e){}
   if(CFG.version)$('#foot').textContent='innolib v'+CFG.version+(CFG.llm?' · модель '+CFG.chatModel:' · модель не подключена');
-  if(location.hash==='#chat')setView('chat');
+  if(location.hash.length>1)setView(location.hash.slice(1));
   await reload();loadDocs();
   // подтягиваем изменения коллег раз в 30 секунд, пока вкладка открыта
   setInterval(()=>{if(!document.hidden&&$('#wOverlay').hidden)reload()},30000);
