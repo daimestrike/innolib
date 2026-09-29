@@ -13,6 +13,10 @@
 - Шрифты лежат в `static/fonts`, внешних CDN нет.
 - LLM необязателен. Без него мастер работает, а консультант показывает найденные кейсы без ответа модели.
 
+## Документация
+
+Подробное описание проекта лежит в папке [`wiki/`](wiki/README.md): что это и зачем, руководство пользователя, устройство системы, развёртывание, наполнение реестра, API, частые вопросы и планы развития. Каждый документ можно перенести в корпоративную вики отдельной страницей.
+
 ## Скачать
 
 Готовые архивы лежат в [Releases](https://github.com/daimestrike/innolib/releases):
@@ -52,10 +56,10 @@ python3 app.py
 Скачать из Releases оба архива и перенести в контур:
 ```bash
 sha256sum -c SHA256SUMS.txt
-docker load -i innolib-image-1.2.0.tar.gz
-tar xzf innolib-1.2.0.tar.gz && cd innolib-1.2.0
+docker load -i innolib-image-1.2.1.tar.gz
+tar xzf innolib-1.2.1.tar.gz && cd innolib-1.2.1
 cp .env.example .env          # заполнить: адрес, модель и ключ API
-INNOLIB_VERSION=1.2.0 docker compose up -d   # образ уже загружен, сборка не нужна
+INNOLIB_VERSION=1.2.1 docker compose up -d   # образ уже загружен, сборка не нужна
 docker compose exec innolib python3 app.py check-llm   # проверить подключение к модели
 ```
 Собрать то же самое локально: `./build_offline.sh` кладёт архивы в `dist/`.

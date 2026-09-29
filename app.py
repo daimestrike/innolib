@@ -138,11 +138,14 @@ class Store:
             r = self.conn.execute("SELECT * FROM cases WHERE id=?", (cid,)).fetchone()
         return self._row(r) if r else None
 
-    def create(self, data, created_at=None, updated_at=None):
+    def create(self, data, created_at=None, updated_at=None, code=None):
         doc = clean_case(data)
         with self.lock:
             cid = uuid.uuid4().hex[:12]
-            code = self._next_code()
+            # при восстановлении из копии сохраняем исходный код, если он свободен
+            if not (code and re.fullmatch(r"INN-\d+", code) and
+                    not self.conn.execute("SELECT 1 FROM cases WHERE code=?", (code,)).fetchone()):
+                code = self._next_code()
             c = created_at or now_iso()
             self.conn.execute("INSERT INTO cases VALUES(?,?,?,?,?)",
                               (cid, code, json.dumps(doc, ensure_ascii=False), c, updated_at or c))
@@ -305,7 +308,8 @@ def import_rows(store, rows):
     for r in rows:
         if not s(r.get("title")):
             continue
-        store.create(r, created_at=s(r.get("createdAt")) or None, updated_at=s(r.get("updatedAt")) or None)
+        store.create(r, created_at=s(r.get("createdAt")) or None, updated_at=s(r.get("updatedAt")) or None,
+                     code=s(r.get("code"), 20) or None)
         n += 1
     return n
 
